@@ -17,15 +17,27 @@ const spreadsheetId = process.env.GOOGLE_SHEET_ID;
 
 router.get('/', async (req, res) => {
   try {
+    console.log('Environment check:');
+    console.log('GOOGLE_CLIENT_EMAIL:', process.env.GOOGLE_CLIENT_EMAIL ? 'Set' : 'Missing');
+    console.log('GOOGLE_PRIVATE_KEY:', process.env.GOOGLE_PRIVATE_KEY ? 'Set' : 'Missing');
+    console.log('GOOGLE_SHEET_ID:', process.env.GOOGLE_SHEET_ID ? 'Set' : 'Missing');
+    
     let date = new Date()
     if (req.query.year && req.query.month) {
       date = new Date(Number.parseInt(req.query.year), Number.parseInt(req.query.month) - 1, 1)
     }
+    console.log('Query params:', req.query);
+    console.log('Date:', date);
+    
     const result = await readSheet(SHEET_TYPES[req.query.type], date)
     res.json({data: result})
   } catch (err) {
-    console.error(err)
-    res.status(500).send('Google Sheet Error')
+    console.error('Detailed error:', err);
+    res.status(500).json({ 
+      error: 'Google Sheet Error',
+      message: err.message,
+      stack: err.stack
+    });
   }
 })
 
@@ -243,6 +255,50 @@ const SHEET_TYPES = {
   INVENTORY: "NHẬP HÀNG",
   COLLABORATORS: "CÔNG TÁC VIÊN",
 }
+
+// PUT route để update order status
+router.put('/status', async (req, res) => {
+  try {
+    const { rowIndex, status, selectedDate } = req.body;
+    
+    console.log('Update status request:', { rowIndex, status, selectedDate });
+    
+    if (!rowIndex || !status || !selectedDate) {
+      return res.status(400).json({ error: 'Missing required fields: rowIndex, status, selectedDate' });
+    }
+
+    // Tạo sheet name theo format tháng/năm
+    const sheetName = getMonthlySheetName(SHEET_TYPES.ORDERS, new Date(selectedDate.year, selectedDate.month - 1, 1));
+    
+    // Cột I (status) ở row index + 4 (vì sheet bắt đầu từ row 4, và rowIndex tính từ 0)
+    const range = `${sheetName}!I${rowIndex + 4}`;
+    
+    console.log('Updating range:', range, 'with status:', status);
+
+    const response = await sheets.spreadsheets.values.update({
+      spreadsheetId,
+      range,
+      valueInputOption: 'RAW',
+      requestBody: {
+        values: [[status]]
+      }
+    });
+
+    console.log('Update response:', response.data);
+    
+    res.json({ 
+      success: true, 
+      message: 'Status updated successfully',
+      data: response.data 
+    });
+  } catch (error) {
+    console.error('Error updating status:', error);
+    res.status(500).json({ 
+      error: 'Failed to update status',
+      message: error.message 
+    });
+  }
+});
 
 module.exports = router
 

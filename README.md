@@ -23,6 +23,7 @@ CLOUDINARY_API_SECRET=your_api_secret
 ## Deployment
 
 Deploy to Vercel:
+
 1. Push to GitHub
 2. Connect to Vercel
 3. Set environment variables

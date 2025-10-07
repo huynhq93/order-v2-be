@@ -17,16 +17,16 @@ app.use('/sheets', sheetRoutes)
 app.use('/images', imageRoutes)
 
 app.get('/api/test', (req, res) => {
-    res.json({
-      message: 'Dữ liệu nhận được',
-    });
-  });
+  res.json({
+    message: 'Dữ liệu nhận được',
+  })
+})
 
 app.get('/test', (req, res) => {
-    res.json({
-      message: 'Backend is working!',
-    });
-  });
+  res.json({
+    message: 'Backend is working!',
+  })
+})
 
 // Root endpoint
 app.get('/', (req, res) => {
@@ -35,13 +35,13 @@ app.get('/', (req, res) => {
     endpoints: {
       sheets: '/sheets?type=ORDERS&month=5&year=2025',
       images: '/images/upload',
-      test: '/test'
-    }
-  });
-});
+      test: '/test',
+    },
+  })
+})
 
 // For Vercel serverless
-module.exports = app;
+module.exports = app
 
 // For local development
 if (process.env.NODE_ENV !== 'production') {
