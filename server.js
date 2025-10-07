@@ -11,10 +11,39 @@ app.use(express.json())
 
 app.use('/api/sheets', sheetRoutes)
 app.use('/api/images', imageRoutes)
+
+// Also mount routes without /api prefix for direct access
+app.use('/sheets', sheetRoutes)
+app.use('/images', imageRoutes)
+
 app.get('/api/test', (req, res) => {
     res.json({
       message: 'Dữ liệu nhận được',
     });
   });
 
-app.listen(5176, () => console.log('✅ Backend running on http://localhost:5176'))
+app.get('/test', (req, res) => {
+    res.json({
+      message: 'Backend is working!',
+    });
+  });
+
+// Root endpoint
+app.get('/', (req, res) => {
+  res.json({
+    message: 'Order Management Backend API',
+    endpoints: {
+      sheets: '/sheets?type=ORDERS&month=5&year=2025',
+      images: '/images/upload',
+      test: '/test'
+    }
+  });
+});
+
+// For Vercel serverless
+module.exports = app;
+
+// For local development
+if (process.env.NODE_ENV !== 'production') {
+  app.listen(5176, () => console.log('✅ Backend running on http://localhost:5176'))
+}
