@@ -12,17 +12,40 @@ cloudinary.config({
 
 
 const storage = multer.memoryStorage()
-const upload = multer({ storage })
+const upload = multer({
+  storage,
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB limit
+  },
+  fileFilter: (req, file, cb) => {
+    // Only allow image files
+    if (file.mimetype.startsWith('image/')) {
+      cb(null, true)
+    } else {
+      cb(new Error('Only image files are allowed!'), false)
+    }
+  },
+})
 
-router.post('/upload', upload.single('file'), async (req, res) => {
+router.post('/', upload.single('file'), async (req, res) => {
   try {
     const file = req.file
-    // console.log('file:',file)
-    // const { file } = req.body
-    // console.log('file1:', file)
+    console.log(
+      'Received file:',
+      file
+        ? {
+            originalname: file.originalname,
+            mimetype: file.mimetype,
+            size: file.size,
+          }
+        : 'No file received',
+    )
 
     if (!file) {
-      return res.status(400).send('Image is null')
+      return res.status(400).json({
+        error: 'No image file provided',
+        message: 'Please select an image file to upload',
+      })
     }
 
     // Convert buffer to base64
@@ -33,10 +56,14 @@ router.post('/upload', upload.single('file'), async (req, res) => {
       folder: 'orders',
     })
 
+    console.log('Upload successful:', result.secure_url)
     res.json({ url: result.secure_url })
   } catch (err) {
-    console.error(err)
-    res.status(500).send('Upload image error')
+    console.error('Upload error:', err)
+    res.status(500).json({
+      error: 'Upload failed',
+      message: err.message || 'An error occurred while uploading the image',
+    })
   }
 })
 
