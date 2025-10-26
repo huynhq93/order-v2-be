@@ -15,6 +15,19 @@ const auth = new google.auth.GoogleAuth({
 const sheets = google.sheets({ version: 'v4', auth });
 const spreadsheetId = process.env.GOOGLE_SHEET_ID;
 
+// Helper function to generate product code: SP{year}{month}{date}{hour}{minute}{second}
+function generateProductCode() {
+  const date = new Date()
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  const hour = String(date.getHours()).padStart(2, '0')
+  const minute = String(date.getMinutes()).padStart(2, '0')
+  const second = String(date.getSeconds()).padStart(2, '0')
+  
+  return `SP${year}${month}${day}${hour}${minute}${second}`
+}
+
 router.get('/', async (req, res) => {
   try {
     let date = new Date()
@@ -63,11 +76,7 @@ router.post('/', async (req, res) => {
     if (!!(!productCode && productImage)) {
       try {
         // Generate unique product code
-        const timestamp = Date.now().toString().slice(-6)
-        const randomNum = Math.floor(Math.random() * 100)
-          .toString()
-          .padStart(2, '0')
-        generatedProductCode = `SP${timestamp}${randomNum}` // Assign to existing variable
+        generatedProductCode = generateProductCode() // Use new format: SP{year}{month}{date}{hour}{minute}{second}
 
         // Add to products sheet
         const existingProducts = await readSheet(SHEET_TYPES.PRODUCTS, dateObj)
@@ -229,11 +238,7 @@ router.put('/:rowIndex', async (req, res) => {
     if (!!(!productCode && productImage)) {
       try {
         // Generate unique product code
-        const timestamp = Date.now().toString().slice(-6)
-        const randomNum = Math.floor(Math.random() * 100)
-          .toString()
-          .padStart(2, '0')
-        generatedProductCode = `SP${timestamp}${randomNum}` // Assign to existing variable
+        generatedProductCode = generateProductCode() // Use new format: SP{year}{month}{date}{hour}{minute}{second}
 
         // Add to products sheet
         const existingProducts = await readSheet(SHEET_TYPES.PRODUCTS, dateObj)
@@ -356,6 +361,83 @@ router.get('/debug/products', async (req, res) => {
     console.error('Debug error:', error)
     res.status(500).json({
       error: 'Debug failed',
+      message: error.message,
+    })
+  }
+})
+
+// Route để lấy tất cả sản phẩm
+router.get('/products', async (req, res) => {
+  try {
+    const currentDate = new Date()
+    let allProducts = []
+
+    // Get products from current month
+    try {
+      const currentMonthProducts = await readSheet(SHEET_TYPES.PRODUCTS, currentDate)
+      allProducts = [...currentMonthProducts]
+    } catch (error) {
+      console.log(
+        `No products sheet found for current month: ${currentDate.getMonth() + 1}/${currentDate.getFullYear()}`,
+      )
+    }
+
+    // Get products from previous months (last 6 months)
+    for (let i = 1; i <= 6; i++) {
+      const pastDate = new Date(currentDate.getFullYear(), currentDate.getMonth() - i, 1)
+      try {
+        const pastProducts = await readSheet(SHEET_TYPES.PRODUCTS, pastDate)
+
+        // Only add products that don't already exist (avoid duplicates)
+        pastProducts.forEach((product) => {
+          const exists = allProducts.some(
+            (existing) => existing.productCode === product.productCode,
+          )
+          if (!exists) {
+            allProducts.push(product)
+          }
+        })
+      } catch (error) {
+        console.log(
+          `No products sheet found for ${pastDate.getMonth() + 1}/${pastDate.getFullYear()}`,
+        )
+      }
+    }
+
+    // Sort by product code (newest first) - SP{year}{month}{date}{hour}{minute}{second}
+    // Since the new format is chronological, we can compare the timestamp part numerically
+    allProducts.sort((a, b) => {
+      // Extract the timestamp part from product code (remove 'SP' prefix)
+      const timestampA = a.productCode?.replace('SP', '') || '0'
+      const timestampB = b.productCode?.replace('SP', '') || '0'
+
+      // Check if both are valid numeric timestamps (14 digits: YYYYMMDDHHMMSS)
+      const isValidA = /^\d{14}$/.test(timestampA)
+      const isValidB = /^\d{14}$/.test(timestampB)
+
+      // If both are valid timestamps, compare numerically
+      if (isValidA && isValidB) {
+        return parseInt(timestampB) - parseInt(timestampA) // Newest first
+      }
+
+      // If only one is valid, prioritize the valid one
+      if (isValidA && !isValidB) return -1 // A comes first
+      if (!isValidA && isValidB) return 1 // B comes first
+
+      // If neither is valid timestamp, sort alphabetically
+      return b.productCode?.localeCompare(a.productCode || '') || 0
+    })
+
+    res.json({
+      success: true,
+      data: allProducts,
+      total: allProducts.length,
+    })
+  } catch (error) {
+    console.error('Error getting all products:', error)
+    res.status(500).json({
+      success: false,
+      error: 'Failed to get products from sheet',
       message: error.message,
     })
   }
