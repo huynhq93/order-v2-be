@@ -17,19 +17,13 @@ const spreadsheetId = process.env.GOOGLE_SHEET_ID;
 
 router.get('/', async (req, res) => {
   try {
-    console.log('Environment check:')
-    console.log('GOOGLE_CLIENT_EMAIL:', process.env.GOOGLE_CLIENT_EMAIL ? 'Set' : 'Missing')
-    console.log('GOOGLE_PRIVATE_KEY:', process.env.GOOGLE_PRIVATE_KEY ? 'Set' : 'Missing')
-    console.log('GOOGLE_SHEET_ID:', process.env.GOOGLE_SHEET_ID ? 'Set' : 'Missing')
-
     let date = new Date()
     if (req.query.year && req.query.month) {
       date = new Date(Number.parseInt(req.query.year), Number.parseInt(req.query.month) - 1, 1)
     }
-    console.log('Query params:', req.query)
-    console.log('Date:', date)
 
     const result = await readSheet(SHEET_TYPES[req.query.type], date)
+
     res.json({ data: result })
   } catch (err) {
     console.error('Detailed error:', err)
@@ -46,6 +40,9 @@ router.post('/', async (req, res) => {
     const {
       date,
       customerName,
+      productCode,
+      orderCode,
+      shippingCode,
       productImage,
       productName,
       color,
@@ -59,7 +56,40 @@ router.post('/', async (req, res) => {
     } = req.body
 
     console.log('req.query.type:', req.query.type)
-    const dateObj = date ? new Date(date) : new Date()
+    const dateObj = date ? parseDateString(date) : new Date()
+    let generatedProductCode = '' // Declare variable at function scope
+
+    // Logic add sản phẩm mới: chỉ khi KHÔNG có productCode và có productImage + productName
+    if (!!(!productCode && productImage)) {
+      try {
+        // Generate unique product code
+        const timestamp = Date.now().toString().slice(-6)
+        const randomNum = Math.floor(Math.random() * 100)
+          .toString()
+          .padStart(2, '0')
+        generatedProductCode = `SP${timestamp}${randomNum}` // Assign to existing variable
+
+        // Add to products sheet
+        const existingProducts = await readSheet(SHEET_TYPES.PRODUCTS, dateObj)
+        const productNextRow = existingProducts.length + 2
+        const productSheetName = getMonthlySheetName(SHEET_TYPES.PRODUCTS, dateObj)
+        const productRange = `${productSheetName}!A${productNextRow}`
+        const productValues = [
+          formatDateForSheet(dateObj),
+          generatedProductCode,
+          productImage ? `=IMAGE("${productImage}")` : '',
+          productName,
+        ]
+
+        await appendSheet(productRange, productValues)
+        console.log(`Added new product to sheet: ${generatedProductCode}`)
+      } catch (error) {
+        console.error('Failed to add product to sheet:', error)
+        res.status(500).json({ error: 'Failed to add product to Google Sheet' })
+        return
+        // Continue with order creation even if product addition fails
+      }
+    }
 
     const result = await readSheet(SHEET_TYPES[req.query.type], dateObj)
     let nextRow = result.length + 4
@@ -72,30 +102,51 @@ router.post('/', async (req, res) => {
     const values = [
       formatDateForSheet(dateObj),
       customerName,
-      productImage ? `=IMAGE("${productImage}")` : '',
-      productName,
-      color,
-      size,
-      quantity,
-      total,
-      status,
-      linkFb,
-      contactInfo,
-      note,
+      productImage ? `=IMAGE("${productImage}")` : '', // Column C - Product Image (keep current structure)
+      productName, // Column D - Product Name (keep current structure)
+      color, // Column E
+      size, // Column F
+      quantity, // Column G
+      total, // Column H
+      status, // Column I
+      linkFb, // Column J
+      contactInfo, // Column K
+      note, // Column L
+      productCode || generatedProductCode || '', // Column M - ProductCode
+      orderCode || '', // Column N - OrderCode (mã đặt hàng)
+      shippingCode || '', // Column O - ShippingCode (mã vận đơn)
     ]
+
+    console.log('Values array:', values)
+    console.log('Values length:', values.length)
+    console.log('ProductCode value:', productCode)
+
+    // Add customer to KHÁCH HÀNG sheet if not exists
+    try {
+      if (customerName && customerName.trim()) {
+        const customerExists = await checkCustomerExists(customerName.trim())
+        if (!customerExists) {
+          await addCustomerToSheet(customerName.trim(), contactInfo, linkFb)
+          console.log(`Added new customer: ${customerName}`)
+        }
+      }
+    } catch (error) {
+      console.error('Error managing customer data:', error)
+      // Continue with order creation even if customer addition fails
+    }
 
     const response = await appendSheet(range, values)
     res.json({ message: 'Order added successfully', data: response })
   } catch (error) {
     console.error('Lỗi khi thêm order:', error)
-    res.status(500).json({ error: 'Failed to add order to Google Sheet' })
+    res.status(500).json({ error: 'Failed to add order 1 to Google Sheet' })
   }
 })
 
 // PUT route để update order status
 router.put('/status', async (req, res) => {
   try {
-    const { rowIndex, status, selectedDate } = req.body
+    const { rowIndex, status, selectedDate, sheetType } = req.body
 
     console.log('Update status request:', { rowIndex, status, selectedDate })
 
@@ -107,7 +158,7 @@ router.put('/status', async (req, res) => {
 
     // Tạo sheet name theo format tháng/năm
     const sheetName = getMonthlySheetName(
-      SHEET_TYPES.ORDERS,
+      SHEET_TYPES[sheetType],
       new Date(selectedDate.year, selectedDate.month - 1, 1),
     )
 
@@ -148,6 +199,9 @@ router.put('/:rowIndex', async (req, res) => {
     const {
       date,
       customerName,
+      productCode,
+      orderCode,
+      shippingCode,
       productImage,
       productName,
       color,
@@ -159,6 +213,7 @@ router.put('/:rowIndex', async (req, res) => {
       contactInfo,
       note,
       month,
+      sheetType,
     } = req.body
 
     console.log('Update full order request:', { rowIndex, body: req.body })
@@ -167,39 +222,92 @@ router.put('/:rowIndex', async (req, res) => {
       return res.status(400).json({ error: 'Missing rowIndex parameter' })
     }
 
+    // Logic add sản phẩm mới khi update: chỉ khi KHÔNG có productCode và có productImage + productName mới
+    const dateObj = date ? parseDateString(date) : new Date()
+    let generatedProductCode = '' // Declare variable at function scope
+
+    if (!!(!productCode && productImage)) {
+      try {
+        // Generate unique product code
+        const timestamp = Date.now().toString().slice(-6)
+        const randomNum = Math.floor(Math.random() * 100)
+          .toString()
+          .padStart(2, '0')
+        generatedProductCode = `SP${timestamp}${randomNum}` // Assign to existing variable
+
+        // Add to products sheet
+        const existingProducts = await readSheet(SHEET_TYPES.PRODUCTS, dateObj)
+        const productNextRow = existingProducts.length + 2
+        const productSheetName = getMonthlySheetName(SHEET_TYPES.PRODUCTS, dateObj)
+        const productRange = `${productSheetName}!A${productNextRow}`
+        const productValues = [
+          formatDateForSheet(dateObj),
+          generatedProductCode,
+          productImage ? `=IMAGE("${productImage}")` : '',
+          productName,
+        ]
+        await appendSheet(productRange, productValues)
+        console.log(`Added new product to sheet: ${generatedProductCode}`)
+      } catch (error) {
+        console.error('Failed to add product to sheet:', error)
+        res
+          .status(500)
+          .json({ error: 'Failed to add product to Google Sheet', errorMSG: error.message })
+        return
+      }
+    }
+
     // Extract month/year from the order's month field (format: "10/2025")
-    const [monthStr, yearStr] = month.split('/')
-    const selectedDate = {
-      month: parseInt(monthStr),
-      year: parseInt(yearStr),
+    let sheetDate = dateObj
+    if (month) {
+      const [monthStr, yearStr] = month.split('/')
+      const selectedDate = {
+        month: parseInt(monthStr),
+        year: parseInt(yearStr),
+      }
+      sheetDate = new Date(selectedDate.year, selectedDate.month - 1, 1)
     }
 
     // Tạo sheet name theo format tháng/năm
-    const sheetName = getMonthlySheetName(
-      SHEET_TYPES.ORDERS,
-      new Date(selectedDate.year, selectedDate.month - 1, 1),
-    )
+    const sheetName = getMonthlySheetName(SHEET_TYPES[sheetType], sheetDate)
 
     // Row trong sheet (rowIndex + 4 vì sheet bắt đầu từ row 4)
     const targetRow = parseInt(rowIndex) + 4
-    const range = `${sheetName}!A${targetRow}:L${targetRow}`
+    const range = `${sheetName}!A${targetRow}:O${targetRow}` // Extend to column N
 
     console.log('Updating range:', range)
+
+    // Add customer to KHÁCH HÀNG sheet if not exists
+    try {
+      if (customerName && customerName.trim()) {
+        const customerExists = await checkCustomerExists(customerName.trim())
+        if (!customerExists) {
+          await addCustomerToSheet(customerName.trim(), contactInfo, linkFb)
+          console.log(`Added new customer during update: ${customerName}`)
+        }
+      }
+    } catch (error) {
+      console.error('Error managing customer data during update:', error)
+      // Continue with order update even if customer addition fails
+    }
 
     // Prepare values array matching the sheet structure
     const values = [
       date,
       customerName,
-      productImage ? `=IMAGE("${productImage}")` : '',
-      productName,
-      color,
-      size,
-      quantity,
-      total,
-      status,
-      linkFb,
-      contactInfo,
-      note,
+      productImage ? `=IMAGE("${productImage}")` : '', // Column C - Product Image (keep current)
+      productName, // Column D - Product Name (keep current)
+      color, // Column E
+      size, // Column F
+      quantity, // Column G
+      total, // Column H
+      status, // Column I
+      linkFb, // Column J
+      contactInfo, // Column K
+      note, // Column L
+      productCode || generatedProductCode || '', // Column M - ProductCode
+      orderCode || '', // Column N - OrderCode (mã đặt hàng)
+      shippingCode || '', // Column O - ShippingCode (mã vận đơn)
     ]
 
     const response = await sheets.spreadsheets.values.update({
@@ -227,10 +335,421 @@ router.put('/:rowIndex', async (req, res) => {
   }
 })
 
+// Debug route to check raw sheet data
+router.get('/debug/products', async (req, res) => {
+  try {
+    const currentDate = new Date()
+    const sheetName = getMonthlySheetName(SHEET_TYPES.PRODUCTS, currentDate)
+
+    console.log('Debug - Sheet name:', sheetName)
+
+    const products = await readSheet(SHEET_TYPES.PRODUCTS, currentDate)
+
+    res.json({
+      sheetName,
+      totalProducts: products.length,
+      products: products,
+      firstProduct: products.length > 0 ? products[0] : null,
+      firstProductKeys: products.length > 0 ? Object.keys(products[0]) : [],
+    })
+  } catch (error) {
+    console.error('Debug error:', error)
+    res.status(500).json({
+      error: 'Debug failed',
+      message: error.message,
+    })
+  }
+})
+
+// Route để tìm kiếm sản phẩm theo mã
+router.get('/products/search/:productCode', async (req, res) => {
+  try {
+    const { productCode } = req.params
+    const currentDate = new Date()
+
+    // Tìm trong sheet sản phẩm tháng hiện tại
+    const currentMonthProducts = await readSheet(SHEET_TYPES.PRODUCTS, currentDate)
+
+    // Debug: kiểm tra structure của từng product
+    currentMonthProducts.forEach((product, index) => {
+      console.log(`Product ${index}:`, {
+        productCode: product.productCode,
+        productName: product.productName,
+        keys: Object.keys(product),
+      })
+    })
+
+    let product = currentMonthProducts.find((p) => p.productCode === productCode)
+    console.log('Found product:', product)
+
+    if (!product) {
+      // Tìm trong 2 tháng trước
+      for (let i = 1; i <= 2; i++) {
+        const pastDate = new Date(currentDate.getFullYear(), currentDate.getMonth() - i, 1)
+        try {
+          const pastProducts = await readSheet(SHEET_TYPES.PRODUCTS, pastDate)
+          product = pastProducts.find((p) => p.productCode === productCode)
+          if (product) break
+        } catch (error) {
+          console.log(`No sheet found for ${pastDate.getMonth() + 1}/${pastDate.getFullYear()}`)
+        }
+      }
+    }
+
+    if (product) {
+      res.json({
+        success: true,
+        data: product,
+      })
+    } else {
+      res.json({
+        success: false,
+        message: 'Không tìm thấy sản phẩm với mã này',
+      })
+    }
+  } catch (error) {
+    console.error('Lỗi khi tìm kiếm sản phẩm:', error)
+    res.status(500).json({
+      success: false,
+      error: 'Failed to search product',
+    })
+  }
+})
+
+// Route để thêm sản phẩm mới vào sheet
+router.post('/products', async (req, res) => {
+  try {
+    const { productCode, productImage, productName } = req.body
+
+    if (!productCode || !productImage || !productName) {
+      return res.status(400).json({
+        error: 'Missing required fields: productCode, productImage, productName',
+      })
+    }
+
+    const currentDate = new Date()
+
+    // Kiểm tra xem sản phẩm đã tồn tại chưa
+    const existingProducts = await readSheet(SHEET_TYPES.PRODUCTS, currentDate)
+    const existingProduct = existingProducts.find((p) => p.productCode === productCode)
+
+    if (existingProduct) {
+      return res.json({
+        success: true,
+        message: 'Sản phẩm đã tồn tại',
+        data: existingProduct,
+      })
+    }
+
+    // Thêm sản phẩm mới
+    const nextRow = existingProducts.length + 2
+    const sheetName = getMonthlySheetName(SHEET_TYPES.PRODUCTS, currentDate)
+    const range = `${sheetName}!A${nextRow}`
+
+    const values = [
+      formatDateForSheet(currentDate),
+      productCode,
+      productImage ? `=IMAGE("${productImage}")` : '',
+      productName,
+    ]
+
+    const response = await appendSheet(range, values)
+
+    res.json({
+      success: true,
+      message: 'Đã thêm sản phẩm mới vào sheet',
+      data: response,
+    })
+  } catch (error) {
+    console.error('Lỗi khi thêm sản phẩm:', error)
+    res.status(500).json({
+      error: 'Failed to add product to sheet',
+    })
+  }
+})
+
+// Route để lấy danh sách customers
+router.get('/customers', async (req, res) => {
+  try {
+    const customers = await getCustomersFromSheet()
+
+    res.json({
+      success: true,
+      data: customers,
+      total: customers.length,
+    })
+  } catch (error) {
+    console.error('Error getting customers:', error)
+    res.status(500).json({
+      success: false,
+      error: 'Failed to get customers from sheet',
+      message: error.message,
+    })
+  }
+})
+
+// Revenue calculation route
+router.post('/revenue', async (req, res) => {
+  try {
+    const { type, year, month } = req.body
+
+    let customerIncome = 0
+    let ctvIncome = 0
+    let totalExpense = 0
+    let details = []
+
+    // Helper function to parse currency string to number
+    function parseCurrency(currencyStr) {
+      if (!currencyStr || currencyStr === '') return 0
+      // Remove all non-digit characters except minus sign
+      const cleanStr = currencyStr.toString().replace(/[^\d-]/g, '')
+      return parseInt(cleanStr) || 0
+    }
+
+    // Helper function to get month name from number
+    function getMonthName(monthNum, year) {
+      const months = [
+        'THÁNG 1',
+        'THÁNG 2',
+        'THÁNG 3',
+        'THÁNG 4',
+        'THÁNG 5',
+        'THÁNG 6',
+        'THÁNG 7',
+        'THÁNG 8',
+        'THÁNG 9',
+        'THÁNG 10',
+        'THÁNG 11',
+        'THÁNG 12',
+      ]
+      return `${months[monthNum - 1]} ${year}`
+    }
+
+    if (type === 'month') {
+      // Get data for specific month
+
+      // 1. Get customer income from "BÁN HÀNG" sheet
+      try {
+        const customerData = await readSheet(SHEET_TYPES.ORDERS, new Date(year, month - 1, 1))
+
+        customerData.forEach((order) => {
+          if (order.total) {
+            customerIncome += parseCurrency(order.total)
+          }
+        })
+      } catch (error) {
+        console.error('Error fetching customer data:', error)
+      }
+
+      // 2. Get CTV income from "CTV" sheet
+      try {
+        const ctvData = await readSheet(SHEET_TYPES.CTV_ORDERS, new Date(year, month - 1, 1))
+
+        ctvData.forEach((order) => {
+          if (order.total) {
+            ctvIncome += parseCurrency(order.total)
+          }
+        })
+      } catch (error) {
+        console.error('Error fetching CTV data:', error)
+      }
+
+      // 3. Get expenses from "ORDCHINA" sheet, cell K2 (total import cost)
+      try {
+        const chinaSheetName = `ORDCHINA_${month}_${year}`
+        const chinaResponse = await sheets.spreadsheets.values.get({
+          spreadsheetId,
+          range: `${chinaSheetName}!K2`, // Cell K2 contains total import cost
+        })
+
+        const chinaRows = chinaResponse.data.values || []
+        if (chinaRows.length > 0 && chinaRows[0][0]) {
+          totalExpense = parseCurrency(chinaRows[0][0])
+        }
+      } catch (error) {
+        console.error('Error fetching China order data:', error)
+      }
+
+      const totalIncome = customerIncome + ctvIncome
+      const profit = totalIncome - totalExpense
+      const profitMargin = totalIncome > 0 ? Math.round((profit / totalIncome) * 100) : 0
+
+      details = [
+        {
+          period: `${month}/${year}`,
+          customerIncome,
+          ctvIncome,
+          totalIncome,
+          expense: totalExpense,
+          profit,
+          profitMargin,
+        },
+      ]
+        } else if (type === 'year') {
+      // Get data for full year (12 months) - Load all months in parallel
+      const months = Array.from({ length: 12 }, (_, i) => i + 1)
+      
+      // Create all promises for parallel execution
+      const monthPromises = months.map(async (m) => {
+        let monthCustomerIncome = 0
+        let monthCtvIncome = 0
+        let monthExpense = 0
+
+        // Load all data for this month in parallel
+        const [customerResult, ctvResult, expenseResult] = await Promise.allSettled([
+          // Get customer income for this month
+          readSheet(SHEET_TYPES.ORDERS, new Date(year, m - 1, 1)).catch(() => []),
+          
+          // Get CTV income for this month
+          readSheet(SHEET_TYPES.CTV_ORDERS, new Date(year, m - 1, 1)).catch(() => []),
+          
+          // Get expenses for this month from cell K2
+          (async () => {
+            try {
+              const chinaSheetName = `ORDCHINA_${m}_${year}`
+              const chinaResponse = await sheets.spreadsheets.values.get({
+                spreadsheetId,
+                range: `${chinaSheetName}!K2`, // Cell K2 contains total import cost
+              })
+              const chinaRows = chinaResponse.data.values || []
+              return chinaRows.length > 0 && chinaRows[0][0] ? parseCurrency(chinaRows[0][0]) : 0
+            } catch (error) {
+              return 0
+            }
+          })()
+        ])
+
+        // Process customer income
+        if (customerResult.status === 'fulfilled') {
+          customerResult.value.forEach((order) => {
+            if (order.total) {
+              monthCustomerIncome += parseCurrency(order.total)
+            }
+          })
+        }
+
+        // Process CTV income
+        if (ctvResult.status === 'fulfilled') {
+          ctvResult.value.forEach((order) => {
+            if (order.total) {
+              monthCtvIncome += parseCurrency(order.total)
+            }
+          })
+        }
+
+        // Process expenses
+        if (expenseResult.status === 'fulfilled') {
+          monthExpense = expenseResult.value
+        }
+
+        const monthTotalIncome = monthCustomerIncome + monthCtvIncome
+        const monthProfit = monthTotalIncome - monthExpense
+        const monthProfitMargin =
+          monthTotalIncome > 0 ? Math.round((monthProfit / monthTotalIncome) * 100) : 0
+
+        return {
+          month: m,
+          period: `${m}/${year}`,
+          customerIncome: monthCustomerIncome,
+          ctvIncome: monthCtvIncome,
+          totalIncome: monthTotalIncome,
+          expense: monthExpense,
+          profit: monthProfit,
+          profitMargin: monthProfitMargin,
+        }
+      })
+
+      // Execute all month promises in parallel
+      const monthResults = await Promise.all(monthPromises)
+
+      // Sort results by month and calculate totals
+      const sortedResults = monthResults.sort((a, b) => a.month - b.month)
+      
+      let yearlyCustomerIncome = 0
+      let yearlyCtvIncome = 0
+      let yearlyExpense = 0
+
+      details = sortedResults.map(result => {
+        yearlyCustomerIncome += result.customerIncome
+        yearlyCtvIncome += result.ctvIncome
+        yearlyExpense += result.expense
+        
+        // Return without the month field
+        const { month, ...detailResult } = result
+        return detailResult
+      })
+
+      customerIncome = yearlyCustomerIncome
+      ctvIncome = yearlyCtvIncome
+      totalExpense = yearlyExpense
+    }
+
+    const totalIncome = customerIncome + ctvIncome
+    const totalProfit = totalIncome - totalExpense
+    const profitMargin = totalIncome > 0 ? Math.round((totalProfit / totalIncome) * 100) : 0
+
+    const result = {
+      totalIncome,
+      totalExpense,
+      totalProfit,
+      profitMargin,
+      details,
+    }
+
+    res.json(result)
+  } catch (error) {
+    console.error('Error calculating revenue:', error)
+    res.status(500).json({
+      error: 'Internal server error',
+      message: error.message,
+    })
+  }
+})
+
 function formatDateForSheet(date) {
   // Format dạng: dd/MM/yyyy hoặc ISO nếu bạn config Sheet đọc kiểu khác
   const d = new Date(date)
   return `${d.getDate()}/${d.getMonth() + 1}/${d.getFullYear()}`
+}
+
+// Helper function to parse DD/MM/YYYY date format
+function parseDateString(dateString) {
+  if (!dateString) return new Date()
+
+  // If it's already a valid Date object, return it
+  if (dateString instanceof Date) return dateString
+
+  // Check if it's in DD/MM/YYYY format
+  const ddmmyyyyPattern = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/
+  const match = dateString.match(ddmmyyyyPattern)
+
+  if (match) {
+    const [, day, month, year] = match
+    // Create date in local timezone by using Date constructor with separate parameters
+    // This avoids timezone issues with ISO string parsing
+    return new Date(parseInt(year), parseInt(month) - 1, parseInt(day), 12, 0, 0, 0)
+  }
+
+  // Check if it's in YYYY/MM/DD format
+  const yyyymmddPattern = /^(\d{4})\/(\d{1,2})\/(\d{1,2})$/
+  const match2 = dateString.match(yyyymmddPattern)
+
+  if (match2) {
+    const [, year, month, day] = match2
+    // Create date in local timezone by using Date constructor with separate parameters
+    return new Date(parseInt(year), parseInt(month) - 1, parseInt(day), 12, 0, 0, 0)
+  }
+
+  // Try default Date parsing (for other formats)
+  const parsedDate = new Date(dateString)
+
+  // If parsing failed, return current date
+  if (isNaN(parsedDate.getTime())) {
+    console.warn(`Invalid date format: ${dateString}, using current date`)
+    return new Date()
+  }
+
+  return parsedDate
 }
 
 // Đọc dữ liệu từ sheet
@@ -259,7 +778,7 @@ async function readSheet(baseSheetName, date) {
     const rows = response.data.sheets?.[0]?.data?.[0]?.rowData || []
 
     // Map the data based on the sheet structure
-    if (baseSheetName === SHEET_TYPES.ORDERS || baseSheetName === SHEET_TYPES.COLLABORATORS) {
+    if (baseSheetName === SHEET_TYPES.ORDERS || baseSheetName === SHEET_TYPES.CTV_ORDERS) {
       // Skip the first 3 rows (headers)
       return rows
         .slice(3)
@@ -269,16 +788,19 @@ async function readSheet(baseSheetName, date) {
             rowIndex: index,
             date: parseGoogleSheetDate(cells[0]),
             customerName: getCellString(cells[1]),
-            productImage: extractImageUrl(getCellString(cells[2])),
-            productName: getCellString(cells[3]),
-            color: getCellString(cells[4]),
-            size: getCellString(cells[5]),
-            quantity: getCellString(cells[6]),
-            total: getCellString(cells[7]),
-            status: getCellString(cells[8]),
-            linkFb: getCellString(cells[9]),
-            contactInfo: getCellString(cells[10]),
-            note: getCellString(cells[11]),
+            productImage: extractImageUrl(getCellString(cells[2])), // Column C - Product Image (current)
+            productName: getCellString(cells[3]), // Column D - Product Name (current)
+            color: getCellString(cells[4]), // Column E
+            size: getCellString(cells[5]), // Column F
+            quantity: getCellString(cells[6]), // Column G
+            total: getCellString(cells[7]), // Column H
+            status: getCellString(cells[8]), // Column I
+            linkFb: getCellString(cells[9]), // Column J
+            contactInfo: getCellString(cells[10]), // Column K
+            note: getCellString(cells[11]), // Column L
+            productCode: getCellString(cells[12]) || '', // Column M - Product Code
+            orderCode: getCellString(cells[13]) || '', // Column N - Order Code (mã đặt hàng)
+            shippingCode: getCellString(cells[14]) || '', // Column O - Shipping Code (mã vận đơn)
             month: `${date.getMonth() + 1}/${date.getFullYear()}`,
           }
         })
@@ -289,24 +811,52 @@ async function readSheet(baseSheetName, date) {
         .slice(1)
         .map((row, index) => {
           const cells = row.values || []
-          return {
+          const rowData = {
             rowIndex: index,
             date: parseGoogleSheetDate(cells[0]),
             customerName: getCellString(cells[1]),
+            productImage: extractImageUrl(getCellString(cells[2])), // Column C - Product Image (current)
+            productName: getCellString(cells[3]), // Column D - Product Name (current)
+            color: getCellString(cells[4]), // Column E
+            size: getCellString(cells[5]), // Column F
+            quantity: getCellString(cells[6]), // Column G
+            total: getCellString(cells[7]), // Column H
+            status: getCellString(cells[8]), // Column I
+            linkFb: getCellString(cells[9]), // Column J
+            contactInfo: getCellString(cells[10]), // Column K
+            note: getCellString(cells[11]), // Column L
+            productCode: getCellString(cells[12]) || '', // Column M - Product Code
+            orderCode: getCellString(cells[13]) || '', // Column N - Order Code (mã đặt hàng)
+            shippingCode: getCellString(cells[14]) || '', // Column O - Shipping Code (mã vận đơn)
+            month: `${date.getMonth() + 1}/${date.getFullYear()}`,
+          }
+
+          // Debug log for shipping code - only for ORDERS
+          if (baseSheetName === SHEET_TYPES.ORDERS && getCellString(cells[14])) {
+            console.log(
+              `[ORDERS] Row ${index + 2}: Found shipping code "${getCellString(cells[14])}" for customer "${getCellString(cells[1])}"`,
+            )
+          }
+
+          return rowData
+        })
+        .filter((item) => item.productName) // Filter out empty rows
+    } else if (baseSheetName === SHEET_TYPES.PRODUCTS) {
+      // Skip the first row (header)
+      return rows
+        .slice(1)
+        .map((row, index) => {
+          const cells = row.values || []
+          return {
+            rowIndex: index,
+            date: parseGoogleSheetDate(cells[0]),
+            productCode: getCellString(cells[1]),
             productImage: extractImageUrl(getCellString(cells[2])),
             productName: getCellString(cells[3]),
-            color: getCellString(cells[4]),
-            size: getCellString(cells[5]),
-            quantity: getCellString(cells[6]),
-            total: getCellString(cells[7]),
-            status: getCellString(cells[8]),
-            linkFb: getCellString(cells[9]),
-            contactInfo: getCellString(cells[10]),
-            note: getCellString(cells[11]),
             month: `${date.getMonth() + 1}/${date.getFullYear()}`,
           }
         })
-        .filter((item) => item.productName) // Filter out empty rows
+        .filter((item) => item.productCode) // Filter out empty rows
     }
     return []
   } catch (error) {
@@ -393,7 +943,272 @@ function formatMonthYear(date = new Date()) {
 const SHEET_TYPES = {
   ORDERS: 'BÁN HÀNG',
   INVENTORY: 'NHẬP HÀNG',
-  COLLABORATORS: 'CÔNG TÁC VIÊN',
+  CTV_ORDERS: 'CTV',
+  PRODUCTS: 'SP',
+  CUSTOMERS: 'KHÁCH HÀNG',
+}
+
+// Create ORDCHINA record
+router.post('/ordchina', async (req, res) => {
+  try {
+    const {
+      managementCode,
+      productName,
+      productImage,
+      status,
+      shippingCodes,
+      note,
+      orderDate,
+      quantity,
+      importPrice,
+      date,
+    } = req.body
+
+    const sheetName = `ORDCHINA_${date.month}_${date.year}`
+
+    // Create sheet if it doesn't exist
+    await createSheetIfNotExists(sheetName)
+
+    // Get existing data to find next row
+    const existingData = await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: `${sheetName}!A:J`,
+    })
+
+    const rows = existingData.data.values || []
+    const nextRow = rows.length + 1
+
+    // Prepare row data - start from column A
+    const rowData = [
+      managementCode, // Column A: Mã quản lý order
+      productName, // Column B: Tên sản phẩm
+      productImage ? `=IMAGE("${productImage}")` : '', // Column C: HÌNH ẢNH
+      status, // Column D: STATUS
+      shippingCodes, // Column E: MÃ VẬN ĐƠN
+      note, // Column F: NOTE
+      orderDate, // Column G: NGÀY CHỐT MUA
+      '', // Column H: NGÀY Hàng về (empty)
+      quantity, // Column I: Số lượng
+      importPrice, // Column J: Giá nhập
+    ]
+
+    // Insert data at specific row
+    await sheets.spreadsheets.values.update({
+      spreadsheetId,
+      range: `${sheetName}!A${nextRow}:J${nextRow}`,
+      valueInputOption: 'USER_ENTERED',
+      resource: {
+        values: [rowData],
+      },
+    })
+
+    res.json({ success: true, managementCode })
+  } catch (error) {
+    console.error('Error creating ORDCHINA record:', error)
+    res.status(500).json({ error: error.message })
+  }
+})
+
+// Helper function to create sheet if it doesn't exist
+async function createSheetIfNotExists(sheetName) {
+  try {
+    // Check if sheet exists
+    const spreadsheet = await sheets.spreadsheets.get({
+      spreadsheetId,
+    })
+
+    const sheetExists = spreadsheet.data.sheets.some(
+      (sheet) => sheet.properties.title === sheetName,
+    )
+
+    if (!sheetExists) {
+      // Create new sheet
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId,
+        resource: {
+          requests: [
+            {
+              addSheet: {
+                properties: {
+                  title: sheetName,
+                },
+              },
+            },
+          ],
+        },
+      })
+
+      // Add headers - start from column A
+      const headers = [
+        'Mã quản lý order', // Column A
+        'Tên sản phẩm', // Column B
+        'HÌNH ẢNH', // Column C
+        'STATUS', // Column D
+        'MÃ VẬN ĐƠN', // Column E
+        'NOTE', // Column F
+        'NGÀY CHỐT MUA', // Column G
+        'NGÀY Hàng về', // Column H
+        'Số lượng', // Column I
+        'Giá nhập', // Column J
+      ]
+
+      await sheets.spreadsheets.values.update({
+        spreadsheetId,
+        range: `${sheetName}!A1:J1`,
+        valueInputOption: 'USER_ENTERED',
+        resource: {
+          values: [headers],
+        },
+      })
+    }
+  } catch (error) {
+    console.error('Error creating sheet:', error)
+    throw error
+  }
+}
+
+// Customer management functions
+async function checkCustomerExists(customerName) {
+  try {
+    const sheetName = SHEET_TYPES.CUSTOMERS
+
+    // Get existing customers data
+    const response = await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: `${sheetName}!A:C`,
+    })
+
+    const rows = response.data.values || []
+
+    // Skip header row and check if customer exists
+    return rows
+      .slice(1)
+      .some((row) => row[0] && row[0].toLowerCase().trim() === customerName.toLowerCase().trim())
+  } catch (error) {
+    console.error('Error checking customer existence:', error)
+    // If sheet doesn't exist, customer doesn't exist
+    return false
+  }
+}
+
+async function addCustomerToSheet(customerName, contactInfo, linkFb) {
+  try {
+    const sheetName = SHEET_TYPES.CUSTOMERS
+
+    // Create sheet if it doesn't exist
+    await createCustomerSheetIfNotExists()
+
+    // Get existing data to find next row
+    const existingData = await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: `${sheetName}!A:C`,
+    })
+
+    const rows = existingData.data.values || []
+    const nextRow = rows.length + 1
+
+    // Prepare customer data
+    const customerData = [
+      customerName || '', // Column A: Tên khách hàng
+      contactInfo || '', // Column B: Địa chỉ/SDT
+      linkFb || '', // Column C: Link FB
+    ]
+
+    // Insert customer data
+    await sheets.spreadsheets.values.update({
+      spreadsheetId,
+      range: `${sheetName}!A${nextRow}:C${nextRow}`,
+      valueInputOption: 'USER_ENTERED',
+      resource: {
+        values: [customerData],
+      },
+    })
+
+    console.log(`Added new customer to sheet: ${customerName}`)
+    return true
+  } catch (error) {
+    console.error('Error adding customer to sheet:', error)
+    throw error
+  }
+}
+
+async function createCustomerSheetIfNotExists() {
+  try {
+    const sheetName = SHEET_TYPES.CUSTOMERS
+
+    // Check if sheet exists
+    const spreadsheet = await sheets.spreadsheets.get({
+      spreadsheetId,
+    })
+
+    const sheetExists = spreadsheet.data.sheets.some(
+      (sheet) => sheet.properties.title === sheetName,
+    )
+
+    if (!sheetExists) {
+      // Create new sheet
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId,
+        resource: {
+          requests: [
+            {
+              addSheet: {
+                properties: {
+                  title: sheetName,
+                },
+              },
+            },
+          ],
+        },
+      })
+
+      // Add headers
+      const headers = [
+        'Tên khách hàng', // Column A
+        'Địa chỉ/SDT', // Column B
+        'Link FB', // Column C
+      ]
+
+      await sheets.spreadsheets.values.update({
+        spreadsheetId,
+        range: `${sheetName}!A1:C1`,
+        valueInputOption: 'USER_ENTERED',
+        resource: {
+          values: [headers],
+        },
+      })
+    }
+  } catch (error) {
+    console.error('Error creating customer sheet:', error)
+    throw error
+  }
+}
+
+async function getCustomersFromSheet() {
+  try {
+    const sheetName = SHEET_TYPES.CUSTOMERS
+
+    const response = await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: `${sheetName}!A:C`,
+    })
+
+    const rows = response.data.values || []
+
+    // Skip header row and map to customer objects
+    return rows
+      .slice(1)
+      .map((row, index) => ({
+        rowIndex: index,
+        customerName: row[0] || '',
+        contactInfo: row[1] || '',
+        linkFb: row[2] || '',
+      }))
+      .filter((customer) => customer.customerName) // Filter out empty rows
+  } catch (error) {
+    console.error('Error getting customers from sheet:', error)
+    return []
+  }
 }
 
 module.exports = router
@@ -426,7 +1241,7 @@ module.exports = router
 //       const rows = response.data.sheets?.[0]?.data?.[0]?.rowData || [];
       
 //       // Map the data based on the sheet structure
-//       if (baseSheetName === SHEET_TYPES.ORDERS || baseSheetName === SHEET_TYPES.COLLABORATORS) {
+//       if (baseSheetName === SHEET_TYPES.ORDERS || baseSheetName === SHEET_TYPES.CTV_ORDERS) {
 //         // Skip the first 3 rows (headers)
 //         return rows.slice(3).map((row, index) => {
 //           const cells = row.values || [];
@@ -551,4 +1366,4 @@ module.exports = router
 //   formatMonthYear(date = new Date()) {
 //     return `${date.getMonth() + 1}/${date.getFullYear()}`
 //   }
-// }; 
+// };

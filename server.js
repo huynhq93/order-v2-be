@@ -4,6 +4,7 @@ require('dotenv').config()
 
 const sheetRoutes = require('./routes/sheets')
 const imageRoutes = require('./routes/images')
+const { router: authRoutes, verifyToken } = require('./routes/auth')
 
 const app = express()
 app.use(cors())
@@ -12,12 +13,16 @@ app.use(cors())
 app.use(express.json({ limit: '50mb' }))
 app.use(express.urlencoded({ limit: '50mb', extended: true }))
 
-app.use('/api/sheets', sheetRoutes)
-app.use('/api/images', imageRoutes)
+// Auth routes (no token required)
+app.use('/api/auth', authRoutes)
 
-// Also mount routes without /api prefix for direct access
-app.use('/sheets', sheetRoutes)
-app.use('/images', imageRoutes)
+// Protected routes (require token)
+app.use('/api/sheets', verifyToken, sheetRoutes)
+app.use('/api/images', verifyToken, imageRoutes)
+
+// Also mount routes without /api prefix for direct access (protected)
+app.use('/sheets', verifyToken, sheetRoutes)
+app.use('/images', verifyToken, imageRoutes)
 
 app.get('/api/test', (req, res) => {
   res.json({
@@ -36,8 +41,14 @@ app.get('/', (req, res) => {
   res.json({
     message: 'Order Management Backend API',
     endpoints: {
-      sheets: '/sheets?type=ORDERS&month=5&year=2025',
-      images: '/images/upload',
+      auth: {
+        login: '/api/auth/login (POST)',
+        verify: '/api/auth/verify (POST)',
+        init: '/api/auth/init-accounts (POST)'
+      },
+      sheets: '/sheets?type=ORDERS&month=5&year=2025 (Protected)',
+      images: '/images/upload (Protected)',
+      revenue: '/sheets/revenue (POST, Protected)',
       test: '/test',
     },
   })
