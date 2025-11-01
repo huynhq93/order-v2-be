@@ -608,11 +608,14 @@ router.post('/revenue', async (req, res) => {
     }
 
     if (type === 'month') {
-      // Get data for specific month
+      // Get data for specific month and calculate daily order counts
 
-      // 1. Get customer income from "BÁN HÀNG" sheet
+      let customerData = []
+      let ctvData = []
+
+      // 1. Get customer income and data from "BÁN HÀNG" sheet
       try {
-        const customerData = await readSheet(SHEET_TYPES.ORDERS, new Date(year, month - 1, 1))
+        customerData = await readSheet(SHEET_TYPES.ORDERS, new Date(year, month - 1, 1))
 
         customerData.forEach((order) => {
           if (order.total) {
@@ -623,9 +626,9 @@ router.post('/revenue', async (req, res) => {
         console.error('Error fetching customer data:', error)
       }
 
-      // 2. Get CTV income from "CTV" sheet
+      // 2. Get CTV income and data from "CTV" sheet
       try {
-        const ctvData = await readSheet(SHEET_TYPES.CTV_ORDERS, new Date(year, month - 1, 1))
+        ctvData = await readSheet(SHEET_TYPES.CTV_ORDERS, new Date(year, month - 1, 1))
 
         ctvData.forEach((order) => {
           if (order.total) {
@@ -652,22 +655,115 @@ router.post('/revenue', async (req, res) => {
         console.error('Error fetching China order data:', error)
       }
 
+      // 4. Calculate daily order counts
+      const dailyOrderCounts = {}
+      const daysInMonth = new Date(year, month, 0).getDate()
+
+      // Initialize all days in month
+      for (let day = 1; day <= daysInMonth; day++) {
+        const dayKey = `${day}/${month}/${year}`
+        dailyOrderCounts[dayKey] = {
+          customerOrderCount: 0,
+          ctvOrderCount: 0,
+          totalOrderCount: 0,
+        }
+      }
+
+      // Helper function to parse date and extract day
+      function extractDayFromDate(dateStr) {
+        if (!dateStr) return null
+
+        console.log('Parsing date:', dateStr, 'Type:', typeof dateStr)
+
+        let day = null
+
+        // Format: DD/MM/YYYY or DD/MM
+        if (typeof dateStr === 'string' && dateStr.includes('/')) {
+          const parts = dateStr.split('/')
+          if (parts.length >= 2) {
+            day = parseInt(parts[0])
+            console.log('Extracted day from string:', day)
+          }
+        }
+        // Handle numeric format (Google Sheets serial date)
+        else if (typeof dateStr === 'number') {
+          // This might be a serial date, convert it
+          const baseDate = new Date(Date.UTC(1899, 11, 30))
+          const date = new Date(baseDate.getTime() + dateStr * 24 * 60 * 60 * 1000)
+          day = date.getDate()
+          console.log('Extracted day from number:', day, 'Full date:', date)
+        }
+        // Handle Date object
+        else if (dateStr instanceof Date) {
+          day = dateStr.getDate()
+          console.log('Extracted day from Date object:', day)
+        }
+
+        const isValid = day && day >= 1 && day <= daysInMonth
+        console.log('Day is valid:', isValid, 'Day:', day, 'Month days:', daysInMonth)
+
+        return isValid ? day : null
+      }
+
+      // Count customer orders by day
+      console.log('Processing customer orders, total:', customerData.length)
+      customerData.forEach((order, index) => {
+        const day = extractDayFromDate(order.date)
+        console.log(`Customer order ${index}: date=${order.date}, extracted day=${day}`)
+        if (day) {
+          const dayKey = `${day}/${month}/${year}`
+          if (dailyOrderCounts[dayKey]) {
+            dailyOrderCounts[dayKey].customerOrderCount++
+            dailyOrderCounts[dayKey].totalOrderCount++
+            console.log(`Added customer order to day ${day}, new count:`, dailyOrderCounts[dayKey])
+          }
+        }
+      })
+
+      // Count CTV orders by day
+      console.log('Processing CTV orders, total:', ctvData.length)
+      ctvData.forEach((order, index) => {
+        const day = extractDayFromDate(order.date)
+        console.log(`CTV order ${index}: date=${order.date}, extracted day=${day}`)
+        if (day) {
+          const dayKey = `${day}/${month}/${year}`
+          if (dailyOrderCounts[dayKey]) {
+            dailyOrderCounts[dayKey].ctvOrderCount++
+            dailyOrderCounts[dayKey].totalOrderCount++
+            console.log(`Added CTV order to day ${day}, new count:`, dailyOrderCounts[dayKey])
+          }
+        }
+      })
+
+      // Create details array with daily data
+      details = []
+      for (let day = 1; day <= daysInMonth; day++) {
+        const dayKey = `${day}/${month}/${year}`
+        const dayData = dailyOrderCounts[dayKey]
+
+        details.push({
+          period: `${day}/${month}/${year}`,
+          customerIncome: 0, // Daily income calculation would be complex, keeping 0 for now
+          ctvIncome: 0, // Daily income calculation would be complex, keeping 0 for now
+          totalIncome: 0, // Daily income calculation would be complex, keeping 0 for now
+          expense: 0, // Daily expense calculation would be complex, keeping 0 for now
+          profit: 0, // Daily profit calculation would be complex, keeping 0 for now
+          profitMargin: 0, // Daily margin calculation would be complex, keeping 0 for now
+          customerOrderCount: dayData.customerOrderCount,
+          ctvOrderCount: dayData.ctvOrderCount,
+          totalOrderCount: dayData.totalOrderCount,
+        })
+      }
+
+      console.log('Final details for month:', month, 'year:', year)
+      console.log('Total details count:', details.length)
+      console.log('Sample details:', details.slice(0, 5))
+      console.log('Days with orders:', details.filter((d) => d.totalOrderCount > 0).length)
+
       const totalIncome = customerIncome + ctvIncome
       const profit = totalIncome - totalExpense
       const profitMargin = totalIncome > 0 ? Math.round((profit / totalIncome) * 100) : 0
-
-      details = [
-        {
-          period: `${month}/${year}`,
-          customerIncome,
-          ctvIncome,
-          totalIncome,
-          expense: totalExpense,
-          profit,
-          profitMargin,
-        },
-      ]
-        } else if (type === 'year') {
+    } else if (type === 'year') {
       // Get data for full year (12 months) - Load all months in parallel
       const months = Array.from({ length: 12 }, (_, i) => i + 1)
       
