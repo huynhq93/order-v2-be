@@ -16,6 +16,7 @@ const auth = new google.auth.GoogleAuth({
 const sheets = google.sheets({ version: 'v4', auth })
 const spreadsheetId = process.env.GOOGLE_SHEET_ID
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-this-in-production'
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '30d'
 
 // Login endpoint
 router.post('/login', async (req, res) => {
@@ -57,7 +58,7 @@ router.post('/login', async (req, res) => {
         role: user.role,
       },
       JWT_SECRET,
-      { expiresIn: '24h' },
+      { expiresIn: JWT_EXPIRES_IN },
     )
 
     res.json({
