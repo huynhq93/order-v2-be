@@ -1124,6 +1124,7 @@ const SHEET_TYPES = {
   CTV_ORDERS: 'CTV',
   PRODUCTS: 'SP',
   CUSTOMERS: 'KHÁCH HÀNG',
+  ORDVIET: 'ORDVIET',
 }
 
 // Create ORDCHINA record
@@ -1388,6 +1389,384 @@ async function getCustomersFromSheet() {
     return []
   }
 }
+
+// ============= ORDER VIET APIs =============
+
+// Helper function to generate bill code: ODVddmmyyhhmmss
+function generateOrderVietBillCode() {
+  const date = new Date()
+  const day = String(date.getDate()).padStart(2, '0')
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const year = String(date.getFullYear()).slice(-2)
+  const hour = String(date.getHours()).padStart(2, '0')
+  const minute = String(date.getMinutes()).padStart(2, '0')
+  const second = String(date.getSeconds()).padStart(2, '0')
+
+  return `ODV${day}${month}${year}${hour}${minute}${second}`
+}
+
+// GET: Get all bills from ORDVIET sheet
+router.get('/ordviet/bills', async (req, res) => {
+  try {
+    const { month, year } = req.query
+    const date = new Date(Number(year), Number(month) - 1, 1)
+    const sheetName = `${SHEET_TYPES.ORDVIET}_${month}_${year}`
+
+    // Check if sheet exists
+    const sheetsResponse = await sheets.spreadsheets.get({
+      spreadsheetId,
+      fields: 'sheets.properties.title',
+    })
+
+    const sheetExists = sheetsResponse.data.sheets?.some(
+      (sheet) => sheet.properties?.title === sheetName,
+    )
+
+    if (!sheetExists) {
+      return res.json({ data: [] })
+    }
+
+    // Get data from sheet
+    const response = await sheets.spreadsheets.get({
+      spreadsheetId,
+      ranges: [`${sheetName}!A:Z`],
+      includeGridData: true,
+      fields: 'sheets.data.rowData.values.userEnteredValue',
+    })
+
+    const rows = response.data.sheets?.[0]?.data?.[0]?.rowData || []
+
+    // Skip header row and map to bill objects
+    const bills = rows
+      .slice(2)
+      .map((row, index) => {
+        const cells = row.values || []
+        return {
+          rowIndex: index + 3, // +2 because we skip 1 header row and sheets are 1-indexed
+          billCode: getCellString(cells[0]),
+          imageUrl: extractImageUrl(getCellString(cells[1])),
+          status: getCellString(cells[2]),
+          quantity: getCellString(cells[3]),
+          total: getCellString(cells[4]),
+          note: getCellString(cells[5]),
+        }
+      })
+      .filter((bill) => bill.billCode) // Filter out empty rows
+
+    res.json({ data: bills })
+  } catch (error) {
+    console.error('Error getting ORDVIET bills:', error)
+    res.status(500).json({
+      error: 'Failed to get ORDVIET bills',
+      message: error.message,
+    })
+  }
+})
+
+// POST: Create new bill in ORDVIET sheet
+router.post('/ordviet/bills', async (req, res) => {
+  try {
+    const { imageUrl, status, quantity, total, note, month, year } = req.body
+
+    const billCode = generateOrderVietBillCode()
+    const sheetName = `${SHEET_TYPES.ORDVIET}_${month}_${year}`
+
+    // Create sheet if it doesn't exist
+    await createSheetIfNotExists(sheetName)
+
+    // Check if this is the first data row (need to add header)
+    const existingData = await sheets.spreadsheets.values.get({
+      spreadsheetId,
+      range: `${sheetName}!A:A`,
+    })
+
+    const existingRows = existingData.data.values || []
+    const nextRow = existingRows.length + 1
+
+    // If first row, add header
+    if (existingRows.length === 0) {
+      await sheets.spreadsheets.values.update({
+        spreadsheetId,
+        range: `${sheetName}!A1:F1`,
+        valueInputOption: 'USER_ENTERED',
+        resource: {
+          values: [['Mã Bill', 'Hình Ảnh', 'Trạng Thái', 'Số Lượng', 'Tổng Thanh Toán', 'Ghi Chú']],
+        },
+      })
+    }
+
+    // Add new bill
+    const imageFormula = imageUrl ? `=IMAGE("${imageUrl}")` : ''
+
+    await sheets.spreadsheets.values.append({
+      spreadsheetId,
+      range: `${sheetName}!A:F`,
+      valueInputOption: 'USER_ENTERED',
+      resource: {
+        values: [[billCode, imageFormula, status, quantity, total, note]],
+      },
+    })
+
+    res.json({
+      success: true,
+      data: {
+        billCode,
+        imageUrl,
+        status,
+        quantity,
+        total,
+        note,
+        rowIndex: nextRow + 1,
+      },
+    })
+  } catch (error) {
+    console.error('Error creating ORDVIET bill:', error)
+    res.status(500).json({
+      error: 'Failed to create ORDVIET bill',
+      message: error.message,
+    })
+  }
+})
+
+// PUT: Update existing bill in ORDVIET sheet
+router.put('/ordviet/bills/:billCode', async (req, res) => {
+  try {
+    const { billCode } = req.params
+    const { imageUrl, status, quantity, total, note, month, year, rowIndex } = req.body
+
+    const sheetName = `${SHEET_TYPES.ORDVIET}_${month}_${year}`
+
+    // Update the bill row
+    const imageFormula = imageUrl ? `=IMAGE("${imageUrl}")` : ''
+
+    await sheets.spreadsheets.values.update({
+      spreadsheetId,
+      range: `${sheetName}!A${rowIndex}:F${rowIndex}`,
+      valueInputOption: 'USER_ENTERED',
+      resource: {
+        values: [[billCode, imageFormula, status, quantity, total, note]],
+      },
+    })
+
+    res.json({
+      success: true,
+      data: {
+        billCode,
+        imageUrl,
+        status,
+        quantity,
+        total,
+        note,
+      },
+    })
+  } catch (error) {
+    console.error('Error updating ORDVIET bill:', error)
+    res.status(500).json({
+      error: 'Failed to update ORDVIET bill',
+      message: error.message,
+    })
+  }
+})
+
+// GET: Get orders with "HÀNG VIỆT" status
+router.get('/ordviet/hang-viet-orders', async (req, res) => {
+  try {
+    const { months } = req.query // Array of month_year strings like ["11_2024", "12_2024"]
+
+    if (!months) {
+      return res.status(400).json({ error: 'months parameter is required' })
+    }
+
+    const monthsArray = Array.isArray(months) ? months : [months]
+    const allOrders = []
+
+    // Fetch orders from both BÁN HÀNG and CTV sheets
+    for (const monthYear of monthsArray) {
+      const [month, year] = monthYear.split('_')
+      const date = new Date(Number(year), Number(month) - 1, 1)
+
+      // Fetch from BÁN HÀNG sheet
+      try {
+        const ordersSheetName = getMonthlySheetName(SHEET_TYPES.ORDERS, date)
+        const ordersData = await readSheet(SHEET_TYPES.ORDERS, date)
+
+        const hangVietOrders = ordersData
+          .filter((order) => order.status === 'HÀNG VIỆT')
+          .map((order) => ({
+            ...order,
+            sheetType: 'ORDERS',
+            month: `${month}/${year}`,
+          }))
+
+        allOrders.push(...hangVietOrders)
+      } catch (error) {
+        console.log(`No BÁN HÀNG sheet for ${month}/${year}`)
+      }
+
+      // Fetch from CTV sheet
+      try {
+        const ctvSheetName = getMonthlySheetName(SHEET_TYPES.CTV_ORDERS, date)
+        const ctvData = await readSheet(SHEET_TYPES.CTV_ORDERS, date)
+
+        const hangVietOrders = ctvData
+          .filter((order) => order.status === 'HÀNG VIỆT')
+          .map((order) => ({
+            ...order,
+            sheetType: 'CTV_ORDERS',
+            month: `${month}/${year}`,
+          }))
+
+        allOrders.push(...hangVietOrders)
+      } catch (error) {
+        console.log(`No CTV sheet for ${month}/${year}`)
+      }
+    }
+
+    res.json({ data: allOrders })
+  } catch (error) {
+    console.error('Error getting HÀNG VIỆT orders:', error)
+    res.status(500).json({
+      error: 'Failed to get HÀNG VIỆT orders',
+      message: error.message,
+    })
+  }
+})
+
+// POST: Process multiple orders (update status to HÀNG VỀ and add bill code)
+router.post('/ordviet/process-orders', async (req, res) => {
+  try {
+    const { orders, billCode } = req.body
+    // orders: Array of { rowIndex, month, sheetType }
+
+    if (!orders || !Array.isArray(orders) || orders.length === 0) {
+      return res.status(400).json({ error: 'orders array is required' })
+    }
+
+    if (!billCode) {
+      return res.status(400).json({ error: 'billCode is required' })
+    }
+
+    const results = []
+
+    // Group orders by month and sheetType
+    const ordersBySheet = {}
+    orders.forEach((order) => {
+      const key = `${order.month}-${order.sheetType}`
+      if (!ordersBySheet[key]) {
+        ordersBySheet[key] = []
+      }
+      ordersBySheet[key].push(order)
+    })
+
+    // Update each sheet
+    for (const key of Object.keys(ordersBySheet)) {
+      const [monthYear, sheetType] = key.split('-')
+      const actualSheetType = key.includes('CTV_ORDERS') ? 'CTV_ORDERS' : 'ORDERS'
+      const [month, year] = monthYear.split('/')
+
+      const date = new Date(Number(year), Number(month) - 1, 1)
+      const sheetName = getMonthlySheetName(SHEET_TYPES[sheetType], date)
+
+      const sheetOrders = ordersBySheet[key]
+
+      // Update status and bill code for each order
+      for (const order of sheetOrders) {
+        const actualRow = order.rowIndex + 4 // +4 because we skip 3 header rows and sheets are 1-indexed
+
+        try {
+          // Update status (column I = 9) and add bill code in note (column L = 12)
+          await sheets.spreadsheets.values.update({
+            spreadsheetId,
+            range: `${sheetName}!I${actualRow}`,
+            valueInputOption: 'USER_ENTERED',
+            resource: {
+              values: [['HÀNG VỀ']],
+            },
+          })
+
+          // Add bill code to note column
+          const currentNoteResponse = await sheets.spreadsheets.values.get({
+            spreadsheetId,
+            range: `${sheetName}!N${actualRow}`,
+          })
+
+          const currentNote = currentNoteResponse.data.values?.[0]?.[0] || ''
+          const newNote = currentNote ? `${currentNote} | ${billCode}` : billCode
+
+          await sheets.spreadsheets.values.update({
+            spreadsheetId,
+            range: `${sheetName}!N${actualRow}`,
+            valueInputOption: 'USER_ENTERED',
+            resource: {
+              values: [[newNote]],
+            },
+          })
+
+          results.push({
+            success: true,
+            rowIndex: order.rowIndex,
+            month: order.month,
+            sheetType: actualSheetType,
+          })
+        } catch (error) {
+          console.error(`Error updating order at row ${actualRow}:`, error)
+          results.push({
+            success: false,
+            rowIndex: order.rowIndex,
+            month: order.month,
+            sheetType: actualSheetType,
+            error: error.message,
+          })
+        }
+      }
+    }
+
+    // Update bill status to "HOÀN THÀNH" after processing orders
+    // Get bill details to find its row
+    const billMonth = billCode.substring(5, 7) // Extract month from ODVddmmyy...
+    const billDay = billCode.substring(3, 5)
+    const billYear = '20' + billCode.substring(7, 9) // Extract year
+
+    const billSheetName = `${SHEET_TYPES.ORDVIET}_${parseInt(billMonth)}_${billYear}`
+
+    try {
+      const billsResponse = await sheets.spreadsheets.values.get({
+        spreadsheetId,
+        range: `${billSheetName}!A:C`,
+      })
+
+      const billRows = billsResponse.data.values || []
+      const billRowIndex = billRows.findIndex((row) => row[0] === billCode)
+
+      if (billRowIndex >= 0) {
+        const actualBillRow = billRowIndex + 1 // sheets are 1-indexed
+
+        await sheets.spreadsheets.values.update({
+          spreadsheetId,
+          range: `${billSheetName}!C${actualBillRow}`,
+          valueInputOption: 'USER_ENTERED',
+          resource: {
+            values: [['HOÀN THÀNH']],
+          },
+        })
+      }
+    } catch (error) {
+      console.error('Error updating bill status:', error)
+    }
+
+    res.json({
+      success: true,
+      results,
+      message: `Processed ${results.filter((r) => r.success).length} orders successfully`,
+    })
+  } catch (error) {
+    console.error('Error processing ORDVIET orders:', error)
+    res.status(500).json({
+      error: 'Failed to process ORDVIET orders',
+      message: error.message,
+    })
+  }
+})
 
 module.exports = router
 
