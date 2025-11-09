@@ -344,23 +344,22 @@ router.put('/:rowIndex', async (req, res) => {
 router.delete('/:rowIndex', async (req, res) => {
   try {
     const { rowIndex } = req.params
-    const { month, sheetType } = req.query
+    const { month, year, sheetType } = req.query
 
-    console.log('Delete order request:', { rowIndex, month, sheetType })
+    console.log('Delete order request:', { rowIndex, month, year, sheetType })
 
     if (!rowIndex || rowIndex === undefined) {
       return res.status(400).json({ error: 'Missing rowIndex parameter' })
     }
 
-    if (!month || !sheetType) {
-      return res.status(400).json({ error: 'Missing month or sheetType parameter' })
+    if (!month || !year || !sheetType) {
+      return res.status(400).json({ error: 'Missing month, year, or sheetType parameter' })
     }
 
-    // Extract month/year from the month field (format: "10/2025")
-    const [monthStr, yearStr] = month.split('/')
+    // Create selectedDate object
     const selectedDate = {
-      month: parseInt(monthStr),
-      year: parseInt(yearStr),
+      month: parseInt(month),
+      year: parseInt(year),
     }
     const sheetDate = new Date(selectedDate.year, selectedDate.month - 1, 1)
 
