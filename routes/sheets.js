@@ -340,6 +340,73 @@ router.put('/:rowIndex', async (req, res) => {
   }
 })
 
+// DELETE route để xóa order
+router.delete('/:rowIndex', async (req, res) => {
+  try {
+    const { rowIndex } = req.params
+    const { month, sheetType } = req.query
+
+    console.log('Delete order request:', { rowIndex, month, sheetType })
+
+    if (!rowIndex || rowIndex === undefined) {
+      return res.status(400).json({ error: 'Missing rowIndex parameter' })
+    }
+
+    if (!month || !sheetType) {
+      return res.status(400).json({ error: 'Missing month or sheetType parameter' })
+    }
+
+    // Extract month/year from the month field (format: "10/2025")
+    const [monthStr, yearStr] = month.split('/')
+    const selectedDate = {
+      month: parseInt(monthStr),
+      year: parseInt(yearStr),
+    }
+    const sheetDate = new Date(selectedDate.year, selectedDate.month - 1, 1)
+
+    // Tạo sheet name theo format tháng/năm
+    const sheetName = getMonthlySheetName(SHEET_TYPES[sheetType], sheetDate)
+
+    // Row trong sheet (rowIndex + 4 vì sheet bắt đầu từ row 4)
+    const targetRow = parseInt(rowIndex) + 4
+
+    console.log('Deleting row:', targetRow, 'from sheet:', sheetName)
+
+    // Delete the row using batchUpdate
+    const response = await sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: {
+        requests: [
+          {
+            deleteDimension: {
+              range: {
+                sheetId: await getSheetId(sheetName),
+                dimension: 'ROWS',
+                startIndex: targetRow - 1, // 0-indexed
+                endIndex: targetRow, // exclusive
+              },
+            },
+          },
+        ],
+      },
+    })
+
+    console.log('Delete response:', response.data)
+
+    res.json({
+      success: true,
+      message: 'Order deleted successfully',
+      data: response.data,
+    })
+  } catch (error) {
+    console.error('Error deleting order:', error)
+    res.status(500).json({
+      error: 'Failed to delete order',
+      message: error.message,
+    })
+  }
+})
+
 // Debug route to check raw sheet data
 router.get('/debug/products', async (req, res) => {
   try {
@@ -766,21 +833,23 @@ router.post('/revenue', async (req, res) => {
     } else if (type === 'year') {
       // Get data for full year (12 months) - Load all months in parallel
       const months = Array.from({ length: 12 }, (_, i) => i + 1)
-      
+
       // Create all promises for parallel execution
       const monthPromises = months.map(async (m) => {
         let monthCustomerIncome = 0
         let monthCtvIncome = 0
         let monthExpense = 0
+        let monthCustomerOrderCount = 0
+        let monthCtvOrderCount = 0
 
         // Load all data for this month in parallel
         const [customerResult, ctvResult, expenseResult] = await Promise.allSettled([
           // Get customer income for this month
           readSheet(SHEET_TYPES.ORDERS, new Date(year, m - 1, 1)).catch(() => []),
-          
+
           // Get CTV income for this month
           readSheet(SHEET_TYPES.CTV_ORDERS, new Date(year, m - 1, 1)).catch(() => []),
-          
+
           // Get expenses for this month from cell K2
           (async () => {
             try {
@@ -794,24 +863,30 @@ router.post('/revenue', async (req, res) => {
             } catch (error) {
               return 0
             }
-          })()
+          })(),
         ])
 
-        // Process customer income
+        // Process customer income and count orders
         if (customerResult.status === 'fulfilled') {
-          customerResult.value.forEach((order) => {
+          const customerData = customerResult.value
+          customerData.forEach((order) => {
             if (order.total) {
               monthCustomerIncome += parseCurrency(order.total)
             }
+            // Count each order (even if total is 0)
+            monthCustomerOrderCount++
           })
         }
 
-        // Process CTV income
+        // Process CTV income and count orders
         if (ctvResult.status === 'fulfilled') {
-          ctvResult.value.forEach((order) => {
+          const ctvData = ctvResult.value
+          ctvData.forEach((order) => {
             if (order.total) {
               monthCtvIncome += parseCurrency(order.total)
             }
+            // Count each order (even if total is 0)
+            monthCtvOrderCount++
           })
         }
 
@@ -834,6 +909,9 @@ router.post('/revenue', async (req, res) => {
           expense: monthExpense,
           profit: monthProfit,
           profitMargin: monthProfitMargin,
+          customerOrderCount: monthCustomerOrderCount,
+          ctvOrderCount: monthCtvOrderCount,
+          totalOrderCount: monthCustomerOrderCount + monthCtvOrderCount,
         }
       })
 
@@ -842,16 +920,16 @@ router.post('/revenue', async (req, res) => {
 
       // Sort results by month and calculate totals
       const sortedResults = monthResults.sort((a, b) => a.month - b.month)
-      
+
       let yearlyCustomerIncome = 0
       let yearlyCtvIncome = 0
       let yearlyExpense = 0
 
-      details = sortedResults.map(result => {
+      details = sortedResults.map((result) => {
         yearlyCustomerIncome += result.customerIncome
         yearlyCtvIncome += result.ctvIncome
         yearlyExpense += result.expense
-        
+
         // Return without the month field
         const { month, ...detailResult } = result
         return detailResult
@@ -1109,13 +1187,35 @@ function parseGoogleSheetDate(cell) {
 }
 
 function getMonthlySheetName(baseSheetName, date = new Date()) {
-  const month = date.getMonth() + 1 // getMonth() returns 0-11
+  const month = date.getMonth() + 1
   const year = date.getFullYear()
   return `${baseSheetName}_${month}_${year}`
 }
 
 function formatMonthYear(date = new Date()) {
-  return `${date.getMonth() + 1}/${date.getFullYear()}`
+  const month = date.getMonth() + 1
+  const year = date.getFullYear()
+  return `${month}/${year}`
+}
+
+// Helper function to get sheet ID by name
+async function getSheetId(sheetName) {
+  try {
+    const spreadsheet = await sheets.spreadsheets.get({
+      spreadsheetId,
+    })
+
+    const sheet = spreadsheet.data.sheets?.find((sheet) => sheet.properties?.title === sheetName)
+
+    if (!sheet) {
+      throw new Error(`Sheet "${sheetName}" not found`)
+    }
+
+    return sheet.properties?.sheetId
+  } catch (error) {
+    console.error('Error getting sheet ID:', error)
+    throw error
+  }
 }
 
 const SHEET_TYPES = {
@@ -1568,7 +1668,7 @@ router.put('/ordviet/bills/:billCode', async (req, res) => {
   }
 })
 
-// GET: Get orders with "HÀNG VIỆT" status
+// GET: Get orders with "ĐÃ ĐẶT HÀNG" status and empty order code
 router.get('/ordviet/hang-viet-orders', async (req, res) => {
   try {
     const { months } = req.query // Array of month_year strings like ["11_2024", "12_2024"]
@@ -1591,7 +1691,10 @@ router.get('/ordviet/hang-viet-orders', async (req, res) => {
         const ordersData = await readSheet(SHEET_TYPES.ORDERS, date)
 
         const hangVietOrders = ordersData
-          .filter((order) => order.status === 'HÀNG VIỆT')
+          .filter(
+            (order) =>
+              order.status === 'ĐÃ ĐẶT HÀNG' && (!order.orderCode || order.orderCode.trim() === ''),
+          )
           .map((order) => ({
             ...order,
             sheetType: 'ORDERS',
@@ -1609,7 +1712,10 @@ router.get('/ordviet/hang-viet-orders', async (req, res) => {
         const ctvData = await readSheet(SHEET_TYPES.CTV_ORDERS, date)
 
         const hangVietOrders = ctvData
-          .filter((order) => order.status === 'HÀNG VIỆT')
+          .filter(
+            (order) =>
+              order.status === 'ĐÃ ĐẶT HÀNG' && (!order.orderCode || order.orderCode.trim() === ''),
+          )
           .map((order) => ({
             ...order,
             sheetType: 'CTV_ORDERS',
@@ -1624,9 +1730,9 @@ router.get('/ordviet/hang-viet-orders', async (req, res) => {
 
     res.json({ data: allOrders })
   } catch (error) {
-    console.error('Error getting HÀNG VIỆT orders:', error)
+    console.error('Error getting ĐÃ ĐẶT HÀNG orders:', error)
     res.status(500).json({
-      error: 'Failed to get HÀNG VIỆT orders',
+      error: 'Failed to get ĐÃ ĐẶT HÀNG orders',
       message: error.message,
     })
   }
