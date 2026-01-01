@@ -88,6 +88,7 @@ router.post('/', async (req, res) => {
           generatedProductCode,
           productImage ? `=IMAGE("${productImage}")` : '',
           productName,
+          total,
         ]
 
         await appendSheet(productRange, productValues)
@@ -250,6 +251,7 @@ router.put('/:rowIndex', async (req, res) => {
           generatedProductCode,
           productImage ? `=IMAGE("${productImage}")` : '',
           productName,
+          total
         ]
         await appendSheet(productRange, productValues)
         console.log(`Added new product to sheet: ${generatedProductCode}`)
@@ -1108,6 +1110,7 @@ async function readSheet(baseSheetName, date) {
             productCode: getCellString(cells[1]),
             productImage: extractImageUrl(getCellString(cells[2])),
             productName: getCellString(cells[3]),
+            total: getCellString(cells[4]),
             month: `${date.getMonth() + 1}/${date.getFullYear()}`,
           }
         })
