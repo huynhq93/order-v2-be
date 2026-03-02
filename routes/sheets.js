@@ -1026,7 +1026,7 @@ async function readSheet(baseSheetName, date) {
       spreadsheetId,
       ranges: [`${sheetName}!A:Z`],
       includeGridData: true,
-      fields: 'sheets.data.rowData.values.userEnteredValue',
+      fields: 'sheets.data.rowData.values(userEnteredValue,effectiveValue)',
     })
     const end = new Date()
     const durationMs = end.getTime() - start.getTime() // thời gian chạy (ms)
@@ -1039,10 +1039,10 @@ async function readSheet(baseSheetName, date) {
       // Skip the first 3 rows (headers)
       return rows
         .slice(3)
-        .map((row, index) => {
+        .map((row) => {
           const cells = row.values || []
           return {
-            rowIndex: index,
+            rowIndex: getCellEffectiveValue(cells[18]) - 4, // Column S - row index (từ công thức row())
             date: parseGoogleSheetDate(cells[0]),
             customerName: getCellString(cells[1]),
             productImage: extractImageUrl(getCellString(cells[2])), // Column C - Product Image (current)
@@ -1171,6 +1171,20 @@ function getCellString(cell) {
   if (val.formulaValue !== undefined) return val.formulaValue
 
   return ''
+}
+
+// Lấy giá trị đã tính toán từ cell (ưu tiên effectiveValue cho công thức)
+function getCellEffectiveValue(cell) {
+  // Ưu tiên lấy từ effectiveValue (giá trị đã tính toán của công thức)
+  const effectiveVal = cell?.effectiveValue
+  if (effectiveVal) {
+    if (effectiveVal.numberValue !== undefined) return String(effectiveVal.numberValue)
+    if (effectiveVal.stringValue !== undefined) return effectiveVal.stringValue
+    if (effectiveVal.boolValue !== undefined) return String(effectiveVal.boolValue)
+  }
+
+  // Fallback về userEnteredValue nếu không có effectiveValue
+  return getCellString(cell)
 }
 
 function parseGoogleSheetDate(cell) {
@@ -1533,7 +1547,7 @@ router.get('/ordviet/bills', async (req, res) => {
       spreadsheetId,
       ranges: [`${sheetName}!A:Z`],
       includeGridData: true,
-      fields: 'sheets.data.rowData.values.userEnteredValue',
+      fields: 'sheets.data.rowData.values(userEnteredValue,effectiveValue)',
     })
 
     const rows = response.data.sheets?.[0]?.data?.[0]?.rowData || []
