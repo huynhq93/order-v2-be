@@ -1709,7 +1709,7 @@ router.get('/ordviet/hang-viet-orders', async (req, res) => {
         const hangVietOrders = ordersData
           .filter(
             (order) =>
-              order.status === 'ĐÃ ĐẶT HÀNG' && (!order.orderCode || order.orderCode.trim() === ''),
+              order.status === 'ĐÃ ĐẶT HÀNG' && (!order.orderCode || order.orderCode.trim() === '' || order.orderCode.startsWith('ODV')),
           )
           .map((order) => ({
             ...order,
@@ -1754,7 +1754,73 @@ router.get('/ordviet/hang-viet-orders', async (req, res) => {
   }
 })
 
-// POST: Process multiple orders (update status to HÀNG VỀ and add bill code)
+// POST: Chỉ gán Mã đặt hàng (column N) = billCode, không đổi status (dùng khi add đơn vào bill)
+router.post('/ordviet/assign-order-code', async (req, res) => {
+  try {
+    const { orders, billCode } = req.body
+
+    if (!orders || !Array.isArray(orders) || orders.length === 0) {
+      return res.status(400).json({ error: 'orders array is required' })
+    }
+
+    if (!billCode) {
+      return res.status(400).json({ error: 'billCode is required' })
+    }
+
+    const results = []
+    const ordersBySheet = {}
+    orders.forEach((order) => {
+      const key = `${order.month}-${order.sheetType}`
+      if (!ordersBySheet[key]) ordersBySheet[key] = []
+      ordersBySheet[key].push(order)
+    })
+
+    for (const key of Object.keys(ordersBySheet)) {
+      const [monthYear, sheetType] = key.split('-')
+      const actualSheetType = key.includes('CTV_ORDERS') ? 'CTV_ORDERS' : 'ORDERS'
+      const [month, year] = monthYear.split('/')
+      const date = new Date(Number(year), Number(month) - 1, 1)
+      const sheetName = getMonthlySheetName(SHEET_TYPES[sheetType], date)
+      const sheetOrders = ordersBySheet[key]
+
+      for (const order of sheetOrders) {
+        const actualRow = order.rowIndex + 4
+        try {
+          await sheets.spreadsheets.values.update({
+            spreadsheetId,
+            range: `${sheetName}!N${actualRow}`,
+            valueInputOption: 'USER_ENTERED',
+            resource: { values: [[billCode]] },
+          })
+          results.push({ success: true, rowIndex: order.rowIndex, month: order.month, sheetType: actualSheetType })
+        } catch (error) {
+          console.error(`Error assigning order code at row ${actualRow}:`, error)
+          results.push({
+            success: false,
+            rowIndex: order.rowIndex,
+            month: order.month,
+            sheetType: actualSheetType,
+            error: error.message,
+          })
+        }
+      }
+    }
+
+    res.json({
+      success: true,
+      results,
+      message: `Đã gán mã đặt hàng cho ${results.filter((r) => r.success).length} đơn`,
+    })
+  } catch (error) {
+    console.error('Error assigning order code:', error)
+    res.status(500).json({
+      error: 'Failed to assign order code',
+      message: error.message,
+    })
+  }
+})
+
+// POST: Process multiple orders (update status to HÀNG VỀ and add bill code) - dùng ở trang Xử Lý Hàng Việt
 router.post('/ordviet/process-orders', async (req, res) => {
   try {
     const { orders, billCode } = req.body
@@ -1807,22 +1873,22 @@ router.post('/ordviet/process-orders', async (req, res) => {
           })
 
           // Add bill code to note column
-          const currentNoteResponse = await sheets.spreadsheets.values.get({
-            spreadsheetId,
-            range: `${sheetName}!N${actualRow}`,
-          })
+          // const currentNoteResponse = await sheets.spreadsheets.values.get({
+          //   spreadsheetId,
+          //   range: `${sheetName}!N${actualRow}`,
+          // })
 
-          const currentNote = currentNoteResponse.data.values?.[0]?.[0] || ''
-          const newNote = currentNote ? `${currentNote} | ${billCode}` : billCode
+          // const currentNote = currentNoteResponse.data.values?.[0]?.[0] || ''
+          // const newNote = currentNote ? `${currentNote} | ${billCode}` : billCode
 
-          await sheets.spreadsheets.values.update({
-            spreadsheetId,
-            range: `${sheetName}!N${actualRow}`,
-            valueInputOption: 'USER_ENTERED',
-            resource: {
-              values: [[newNote]],
-            },
-          })
+          // await sheets.spreadsheets.values.update({
+          //   spreadsheetId,
+          //   range: `${sheetName}!N${actualRow}`,
+          //   valueInputOption: 'USER_ENTERED',
+          //   resource: {
+          //     values: [[newNote]],
+          //   },
+          // })
 
           results.push({
             success: true,
